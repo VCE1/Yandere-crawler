@@ -6,8 +6,8 @@ import threading
 import Http
 import Yandere
 import Function
-
-
+import concurrent.futures
+import threading
 def switch_convert(status):
     # 将选项转换为1/0以便判断，倒不是我忘了用bool……
     # 非大小写'y'输入均被判断为否定，包括回车
@@ -131,6 +131,8 @@ def add_log(content):
         container.see('end')
     Function.add(folder_path, log_file_name, content + '\n')
 
+    
+
 def main(settings: dict, tags: str, discard_tags: str, output_container, output_mode: str):
     global end
     global data
@@ -148,10 +150,13 @@ def main(settings: dict, tags: str, discard_tags: str, output_container, output_
     lock = threading.Condition()
     Function.create_folder(folder_path)
 
+
     # 建立线程
     # 只启用了单线程
+    #改为多线程,默认4线程
     get_data(settings, tags)
     parallel_task(settings, discard_tags).join()
+
 
 # 也可以不用进程锁
 # 生产者线程：抓取页面，将post元素补充入data队列
@@ -213,45 +218,43 @@ class get_data(threading.Thread):
                     lock.wait()
                 lock.release()
 
-# 消费者线程：从data队列获取post并根据条件筛选，满足条件执行下载
-class parallel_task(threading.Thread):
-    def __init__(self, settings, discard_tags):
-        threading.Thread.__init__(self)
-        self.daemon = True
-        self.settings = settings
-        self.discard_tags = discard_tags
-        self.start()
-    def run(self):
-        global end
-        global lock
-        global data
-        settings = self.settings
-        stop_page = settings['stop_page']
-        delay_on = settings['random_delay']
-        if settings['tag_search']:
-            last_stop_id = settings['tagSearch_last_stop_id']
-        else:
-            last_stop_id = settings['last_stop_id']
+
+# 定义一个处理每个任务的函数
+def process_task(settings, discard_tags, post):
+    global end
+    global lock
+    global data
+    stop_page = settings['stop_page']
+    delay_on = settings['random_delay']
+    if settings['tag_search']:
+        last_stop_id = settings['tagSearch_last_stop_id']
+    else:
+        last_stop_id = settings['last_stop_id']
+    if post['id'] <= last_stop_id and not stop_page:
+        # 达到上次爬取位置，跳出循环
+        add_log('达到上次爬取终止位置')
+        end = True
+        return
+    post['id'] = str(post['id'])
+    if judge(post, settings, discard_tags):
+        download(post)
+        if delay_on:
+            # 两次下载间随机间隔，虽然不觉得有啥用
+            time.sleep(random.uniform(0.5, 10.0))
+
+
+# 使用线程池来处理任务
+def parallel_task(settings, discard_tags, max_workers=4):
+    # 创建一个线程池，最多可以创建 max_workers 个线程
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         while True:
             if lock.acquire():
                 if len(data):
                     post = data.pop(0)
                     time.sleep(0.002)
                     lock.notify(1)
-                    if post['id'] <= last_stop_id and not stop_page:
-                        # 达到上次爬取位置，跳出循环
-                        add_log('达到上次爬取终止位置')
-                        end = True
-                        lock.release()
-                        break
-                    else:
-                        lock.release()
-                    post['id'] = str(post['id'])
-                    if judge(post, settings, self.discard_tags):
-                        download(post)
-                        if delay_on:
-                            # 两次下载间随机间隔，虽然不觉得有啥用
-                            time.sleep(random.uniform(0.5, 10.0))
+                    # 使用线程池来执行任务
+                    executor.submit(process_task, settings, discard_tags, post)
                     continue
                 else:
                     if end:
